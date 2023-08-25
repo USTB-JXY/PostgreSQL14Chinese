@@ -1,0 +1,2054 @@
+hi everybody thanks for coming to my talk this is my name is Thomas Monroe
+大家好，感谢大家来参加我的演讲，我的名字是 Thomas Monroe，
+
+and I'm going to be talking about um
+我将要谈论的
+
+the topic of how postgres processes wake each other up
+主题是 postgres 进程如何互相唤醒，
+
+okay so over the past couple of decades
+好吧，所以在过去的几十年里，
+
+there's been a whole series of gradual changes
+出现了一系列渐进的过程
+
+um from a situation where postgres used to spend
+与过去postgres 花费
+
+a lot of time sleeping for fixed periods of time and
+大量时间在固定时间段内睡眠并
+
+polling things and it used blocking system calls for a
+轮询事物的情况发生了变化，它使用阻塞系统调用来进行
+
+number of kinds of socket communication and things like that
+多种套接字通信以及诸如
+
+um and signal handlers used to do quite a lot
+嗯和信号处理程序过去常常做的事情
+
+of work and around about 20 years ago this check
+大约 20 年前，我们
+
+for interrupts macro arrived and we began to began the sort of slow process
+做了很多工作，对中断宏进行了检查，我们开始开始一种缓慢的过程，
+
+of moving to
+转向
+
+the the kind of Ideal State we're not at the ideal stage yet but moving towards
+理想状态，我们还没有处于理想阶段，但正在转向
+
+this later state where all of our second iOS is non-blocking and
+后来的状态，其中 我们所有的第二个iOS 都是非阻塞的，我们
+
+instead of using various sleeping calls all over the place and doing things in a
+没有在各处使用各种睡眠调用，也没有以
+
+kind of sloppy way we try to get precise we try to wake up at precisely the right
+一种草率的方式做事，我们试图获得精确性，我们尝试在正确的
+
+time compute the exact moment we need to wake up to send it send a message or a
+时间醒来，计算我们需要的确切时刻唤醒发送消息或
+
+heartbeat or something like that and waking other processes up exactly when
+心跳或类似的东西，并在其他进程
+
+when they should be working because data is
+应该工作的时候唤醒它们，因为数据已经
+
+ready for them or something like that and that's involved
+准备好或类似的东西，这涉及到
+
+um also involves taking a whole lot of logic out of signal handlers which I'm
+嗯还涉及到大量的逻辑 我稍后将讨论信号处理程序，
+
+going to talk about in a moment and making it into Cooperative work that
+并将其纳入
+
+happens in this check for interrupt system
+中断系统检查中发生的协作工作，
+
+but the work's not finished in this area and I'll talk about that a bit as well
+但该领域的工作尚未完成，我也会稍微讨论一下，所以
+
+so um each release has got some
+嗯 每个版本
+
+improvements in in these areas so for example in 16 with
+在这些方面都有一些改进，例如在 16 中进行了
+
+refactored it so that the postmaster no longer runs a whole bunch of State
+重构，以便邮局管理员不再运行一大堆状态
+
+machine stuff and forks child processes inside a single Handler which was pretty
+机内容并在单个处理程序中分叉子进程，这是非常值得怀疑的
+
+questionable I'm not sure if it was legal or not I think it
+我不确定是否 它是否合法我认为这
+
+depends which version of the standard you look at posix standard
+取决于您查看的标准版本是 posix 标准，
+
+you look at but certainly that caused some problems for us on a couple of
+但这肯定会给我们在几个晦涩的操作系统上带来一些问题，
+
+obscure os's um
+嗯
+
+there's a another change which may or may not go into 16 uh it's getting
+还有另一个更改可能会也可能不会进入 16 呃
+
+pretty late now but that fixes a bunch of
+现在已经很晚了，但这修复了
+
+um bad programming that's in in a Sig user one Handler which I'll talk about
+Sig用户一个处理程序中的一堆糟糕的编程，我稍后会讨论这些编程，
+
+in a moment I'll talk about why that's bad
+我将谈论为什么这是糟糕的，
+
+um and there's a few other smaller changes for example the wall receiver no
+还有一些其他较小的更改，例如 墙壁接收器
+
+longer wakes up 10 times a second to figure out what it should be doing it
+不再每秒唤醒 10 次来弄清楚它应该做什么，它会
+
+tries to keep track of time better and there's a couple of other things
+尝试更好地跟踪时间，还有一些
+
+like that and these are um sort of gradual improvements that you
+类似的事情，这些是您
+
+find in each postgres release that make it more efficient and make it do things
+在每个 postgres 版本中发现的渐进式改进 让它更有效率，让它
+
+at the right time and make it not waste Power by waking up all the time and make
+在正确的时间做事，让它不会因为一直醒来而浪费电力，也
+
+it not late for things by polling like you know like imagine a loop that sleeps
+不会因为你知道的轮询而迟到，就像想象一个循环，休眠
+
+for a second and then sees if it has to do something instead it gets woken up at
+一秒钟然后看到 如果它必须做某事，它就会在
+
+the right time um
+正确的时间被唤醒，嗯，
+
+but so that's some examples for postcode 16 there's a similar list in each
+但是这是邮政编码16 的一些示例，每年每个版本中都有一个类似的列表，
+
+release every year we sort of improve these things and track down more
+我们会改进这些事情并追踪更多类似的
+
+problems like that so um this is a kind of stack of um
+问题，所以嗯，这是 一堆嗯
+
+of facilities I'm going to talk about most of these and I'm going to work from
+的设施，我将讨论其中的大部分，我将自下而上地工作，
+
+the bottom up
+
+
+so the basic structure of the talk is I've got three parts and first I'm just
+所以演讲的基本结构是我有三个部分，首先我
+
+going to do this kind of Public Service Announcement and talk about the dangers
+要 做这种公共服务公告，谈论
+
+of signal handlers and programming with signals and
+信号处理程序和信号编程的危险，以及
+
+how it just seems to produce never-ending bugs and there's like a
+它似乎如何产生永无休止的错误，并且
+
+certain way you should do things to avoid those with with them certain
+您应该采取某种方式来避免那些使用它们的某些
+
+patterns that avoid well-known working patterns that avoid problems and then
+模式 避免众所周知的避免问题的工作模式，然后
+
+I'm going to move on to talking about the postgres apis that we use to
+我将继续讨论我们用来
+
+do a better job of that kind of thing and to solve those problems and then
+更好地完成此类事情并解决这些问题的 postgres api，
+
+finally I'm going to have some talk a bit about some ideas for further
+最后我将 谈谈一些进一步改进的想法吧，
+
+improvements
+
+
+right um so first super briefly
+嗯，所以首先非常简短，
+
+um I'm going to talk about Hardware interrupts has anyone seen one of those
+嗯，我要谈谈硬件中断，以前有人见过其中的一个吗，
+
+before so um this is a very cheap British
+所以嗯，这是一台 80 年代初的非常便宜的英国
+
+computer from the early 80s and one of these when I was a kid and um the
+计算机，也是其中之一 当我还是个孩子的时候，
+
+first games that I saw on it had text like 32 by 20 text or something like
+我在上面看到的第一款游戏有类似 32 x 20 的文本或类似的东西，
+
+that and the games were made out of Blocky characters but then these amazing
+这些游戏是由块状字符制成的，但后来这些令人惊叹的
+
+games started coming out that seem to have high resolution Graphics like
+游戏开始出现，似乎具有高分辨率 像
+
+Rocket Man here Rocket Man was my favorite game
+火箭人这样的图形火箭人是我最喜欢的游戏，
+
+and um the way it works people basically began to figure out how the video how it
+嗯它的工作方式人们基本上开始弄清楚视频是如何
+
+works and they began to realize that the scan line from the video output that
+工作的，他们开始意识到
+
+goes to the TV every time the cathode ray scans across it would raise this pin
+每次视频输出到电视的扫描线 阴极射线扫描它会升高
+
+that was connected to the interrupt pin and you could get the CPU to basically
+连接到中断引脚的引脚，并且您可以让 CPU 基本上
+
+jump to an interrupt Handler interrupt service routine and do whatever you want
+跳转到中断处理程序中断服务例程并执行您想做的任何操作，
+
+so if you change the characters that it's showing on the screen really fast
+因此如果您确实更改了屏幕上显示的字符 在
+
+with just the right time you can display high resolution Graphics or pseudo high
+正确的时间快速地你可以显示高分辨率图形或伪
+
+resolution Graphics which was a pretty cool trick I thought but then I sort of
+高分辨率图形，我认为这是一个非常酷的技巧，但后来我
+
+began to read a little bit about how you know programming with interrupts and it
+开始阅读一些关于如何了解中断编程的内容，这
+
+was incredibly difficult because when the interrupt comes in and you're you're
+是非常困难的，因为当中断进来了，你
+
+you know your program basically you know captures the return address and dumps
+知道你的程序基本上你知道捕获返回地址并将
+
+you somewhere else into this routine but you've got to keep track of what was
+你转储到这个例程的其他地方，但你必须跟踪
+
+happening before and you've got to write code that when it is finished and when
+之前发生的事情，并且你必须编写代码，当它完成和
+
+it returns it
+返回时，它
+
+cooperates well with the code that it was in that was interrupted and it
+与被中断的代码很好地配合，并且它
+
+always interrupts in between two machine code instructions and you've got to
+总是在两个机器代码指令之间中断，你必须将
+
+build that into your model you've got to think any two machine code instructions
+其构建到你的模型中，你必须考虑 任何两个机器代码指令
+
+the interrupt could could land right there and I've got to make sure that the
+中断都可以在那里发生，我必须确保
+
+program still makes sense and does the right thing
+程序仍然有意义并且做正确的事情，
+
+so in a modern system obviously there's multiple cores in a modern system and
+所以在现代系统中显然有多个核心在现代系统中并且
+
+each course got an interrupt control that can Multiplex a whole bunch of
+每个课程都有一个中断可以多路复用一大堆
+
+different stuff time is and so forth and there's an i o interrupt controller
+不同东西的控制，时间等等，还有一个 i o 中断控制器，
+
+that's going to bring interrupts in from storage and networks and all that good
+它将从存储和网络引入中断以及所有这些好
+
+stuff including inter process interrupts and for the most part we don't care
+东西，包括进程间中断，并且在大多数情况下我们不关心
+
+about any of that because that's just things used by the kernel to
+关于其中任何一个，因为这只是内核用来
+
+create its wonderful Illusions like synchronous IO and multitasking and all
+创建其美妙幻想的东西，例如同步 IO 和多任务处理以及所有
+
+that stuff so we don't really have to think about that but there is one case
+这些东西，所以我们实际上不必考虑这一点，但有一种情况
+
+where we do
+我们会这样做，
+
+um although I've got an asterisk here there is a new technology for user space
+尽管我已经 这里有一个星号，有一种用于用户空间
+
+um uh inter-processing drugs which is kind of interesting but that's not
+嗯嗯交互处理药物的新技术，这有点有趣，但这
+
+um not something we can use yet
+不是我们可以使用的东西，
+
+so there's one case though where the difficulty of program like the
+所以有一种情况，程序的难度就像
+
+difficulty of programming with interrupts is mainly a problem for
+中断编程的难度一样 对于内核人员来说主要是一个问题，
+
+kernel people but essentially signals expose some of the
+但本质上信号向应用程序程序员暴露了
+
+difficulties of that type of programming to application programmers
+此类编程的一些困难，
+
+and there's a quote from the advanced programming in the Unix environment book
+并且引用了 Stevens 的《Unix 环境中的高级编程》一书中的内容，
+
+from Stevens where he said basically signals the software
+他说基本上是软件
+
+interrupts um and
+中断的信号，
+
+so here's a list from this is a list taken from a man page on a Mac
+所以这里是 这里的列表是从 Mac 上的手册页中获取的列表，
+
+um but there's going to be a similar list to that with 32 different types of
+但是将会有一个类似的列表，其中包含 32 种不同类型的
+
+signals that can be used on on most Unix systems there's also um
+信号，可以在大多数 Unix系统上使用，还有
+
+so-called real-time signals that I'm not talking about in this talk um just
+所谓的实时信号 我在本次演讲中没有讨论的信号，只是
+
+focusing on the classic reliable signals and there's always different signals
+关注经典的可靠信号，并且总是有不同的信号，
+
+that I'm sure everyone's seen before if they've ever
+我相信每个人以前都见过，如果他们曾经因
+
+crashed a program with a seg fault or um had to kill a program with kill and
+段错误而导致程序崩溃，或者嗯必须杀死一个程序
+
+so on and you know there's a default action for each of those and you can
+你知道每个程序都有一个默认操作，你可以
+
+install the Handler so um really quickly in the in in
+很快地在
+
+postgres who sends signals and why will hit his his main main uses of signals
+postgres 中安装处理程序，谁发送信号，为什么会击中他的主要信号的主要用途
+
+first of all there's the kind of outside world interfaces like you might hit Ctrl
+首先有 那种外部世界接口，比如你可能会按 Ctrl
+
+c um to interrupt P SQL or you might send
+cum 来中断 P SQL，或者你可能会
+
+sick Hub to the server because you wanted to help to reload the
+向服务器发送有病的 Hub，因为你想帮助重新加载
+
+configuration and so on there's a kind of external interfaces
+配置等等，有一种外部接口，
+
+um and then there's a bunch of signals flying around inside postgres between
+然后还有一堆 信号在postgres 内部的进程之间飞来飞去，
+
+the processes that make it up um the the postmaster telling the child
+邮局管理员告诉子
+
+processes to shut down that kind of stuff and then there's it's certain ad
+进程关闭这类东西，然后有一些特定的
+
+hoc signals but we also have these these things that we invented PM signals and
+临时信号，但我们也有这些我们发明的 PM 信号和
+
+proc signals and latches and I'll talk about that in a minute
+proc 的东西 信号和锁存器，我会在一分钟内讨论这个，
+
+um and then there's a bunch of other things
+嗯，然后还有一堆来自内核的其他事情，嗯，
+
+that come from the kernel um out of memory can kill you and there's
+内存不足可能会杀了你，
+
+floating Point exceptions if you divide by zero and those kind of things and
+如果你除以零，就会出现浮点异常，这些事情和 还有
+
+there's a couple more that we that we make um good use of Sig alarm to get a
+更多，我们很好地利用 Sig 警报来获得
+
+timer um and seek chilled when
+计时器，并在
+
+um when a child exits we also have a signal that we ask for when the parent
+孩子退出时寻求冷却，我们还有一个信号，要求家长
+
+Texas so um when do all of these signal
+德克萨斯州什么时候发出所有这些信号
+
+handlers run well in the case of synchronous signals they happen exactly
+处理程序在同步信号的情况下运行良好，它们恰好
+
+at the instruction that provoked them so if you try to execute an illegal
+在引发它们的指令处发生，因此如果您尝试执行
+
+instruction which normally shouldn't happen but an example is if you try and
+通常不应该发生的非法指令，但一个例子是如果您尝试
+
+use the crc32cb built-in thing on an arm CPU
+在
+
+that doesn't have that option then you might get sick ill and we actually use
+没有该选项的arm CPU，那么您可能会生病，我们实际上
+
+that in both quests to test whether the the the machine has that Hardware or not
+在两个任务中都使用它来测试机器是否具有该硬件，
+
+and there's various other synchronous examples Sig FPE is probably the best
+并且还有各种其他同步示例 Sig FPE 可能是最好的
+
+example because if you divide by zero you get one of those but we know when
+示例，因为如果 你除以零，你会得到其中之一，但我们知道什么时候
+
+that's going to run it runs exactly when when you're when when the instruction
+运行，它会准确地运行，当你
+
+they did something bad was running so it's synchronous and then when it you
+做坏事的指令正在运行时，所以它是同步的，然后当你
+
+know it's relatively easy to program with those kind of signals you can do
+知道它相对容易编程时 对于这些类型的信号，您可以
+
+anything you want on those signal handlers because you know exactly what
+在这些信号处理程序上执行任何您想要的操作，因为您确切地知道
+
+the state is but the asynchronous signals are much more complicated and
+状态是什么，但是异步信号要复杂得多，并且
+
+these are ones that are um you know they could occur in between
+这些信号是您知道它们可能发生在
+
+any two instructions in our in our Mainline program
+我们的中的任何两条指令之间的信号。 我们的主线程序中，
+
+so what happens when a signal when an
+当
+
+asynchronous signal is generated is that it's marked as as pending in the process
+生成异步信号时，会发生什么情况，它在进程或线程中被标记为待处理，
+
+or thread and then imagine there's a bitmap of pending uh signals
+然后想象有一个待处理信号的位图，
+
+um but signals can also be blocked by by number and so if they're blocked then
+但信号也可以按数字阻塞，所以如果 它们被阻止了，那么
+
+they'll just stay pending until you unblock it for the ones that can be
+它们将一直处于挂起状态，直到您为那些可以被阻止的人解除阻止，
+
+blocked um so to answer the question when do
+所以要回答这个问题，
+
+they actually run it used to be before SMP systems with multiple CPUs it used
+他们实际上什么时候运行它，以前是在具有多个 CPU 的 SMP 系统之前，它曾经
+
+to be that sort of tied into this into the scheduling but on Modern systems an
+是这样的 与调度相关联，但在现代系统上，
+
+interrupt is used to to wake up another thread if it's running right now and it
+中断用于唤醒另一个线程（如果它正在运行），这
+
+which means that signal handlers do run pretty quickly if you if if the
+意味着如果
+
+program's already running the target process is already running and it could
+程序已经在运行且目标进程已经在运行，则信号处理程序确实运行得很快 它可以
+
+be arbitrarily in between any pair instructions
+任意位于 Windows 上的任何成对指令之间，
+
+on Windows we have a rather complicated system in postgres to emulate signals
+我们在 postgres 中有一个相当复杂的系统来模拟信号，
+
+and that's the way that postgres was ported to Windows a long long time ago
+这就是 postgres很久以前移植到 Windows 的方式，
+
+um so we kind of emulate all of those things like the concept of a pending
+嗯，所以我们有点模拟所有这些东西，比如 挂起
+
+signal set and so forth and then they can only actually run at places where we
+信号集的概念等等，然后它们实际上只能在我们
+
+call this dispatch function which is hidden in various places
+调用这个调度函数的地方运行，该函数隐藏在各个地方，
+
+so actually signals can run much fewer places on Windows than on on Unix
+所以实际上信号在 Windows 上运行的地方比在
+
+systems in postgres so I'm just going to run through really
+postgres 中的 Unix 系统上运行的地方要少得多，所以我' 我只是要
+
+quickly some of the kinds of stuff that goes horribly wrong when you first try
+快速地完成一些当你第一次尝试对信号进行编程时会出现严重错误的东西，
+
+and program the signals so starting with really basic stuff that
+所以从非常基本的东西开始，
+
+um if you have a program here and I've got
+嗯，如果你在这里有一个程序，我已经有了，嗯，
+
+um I've got a function f and it's it's examining some Global variable X and and
+我已经有了 一个函数 f ，它正在检查某个全局变量 X，并且
+
+you know if it's got a certain value it sets it to another value but the type of
+您知道它是否有某个值，它将其设置为另一个值，但
+
+that variable X is such that it doesn't that the load or store from that
+该变量 X 的类型是这样的，因此从该变量加载或存储
+
+variable doesn't compile to a single instruction and if you look at my fake
+不会 不能编译成一条指令，如果你看看我伪造的
+
+made up Assembly Language there um I've just I've just shown that that X
+汇编语言，嗯，我刚刚表明，无论出于什么原因，X
+
+has to be loaded and stored in two parts of iPad
+必须加载并存储在 iPad 的两个部分
+
+and low part for whatever reason it's just some imaginary wide type and that
+和低部分中只是一些想象的宽类型，这
+
+means that if the as I said the the signal can be
+意味着如果正如我所说，信号可以被
+
+um caught in between any two instructions so it could be halfway
+捕获在任何两条指令之间，因此它可能在
+
+through loading the variable or storing the variable and then you might see
+加载变量或存储变量的中间，然后你可能会
+
+something that's not Atomic you see a kind of mixture of the old and the new
+看到一些不是原子的东西 在
+
+value after the signal hand that runs or in the single Handler depending on
+运行的信号手之后或在单个处理程序中的一种旧值和新值的混合，具体取决于
+
+where it runs in those two points and the solution to that is to um use this
+它在这两点中运行的位置，解决方案是使用
+
+segaatomic type which um the the C language promises will not
+C 语言承诺的这种 segaatomic 类型 不会
+
+have that problem it's just some type and on a modern this isn't probably a
+有这个问题，它只是某种类型，在现代系统上，这可能不是
+
+problem for any integer type on on a modern system but it has has been in the
+现代系统上任何整数类型的问题，但它在过去一直存在
+
+past and so that's that's a type that we would use to solve that problem
+，所以这就是我们用来解决这个问题的类型 问题
+
+um another problem that is kind of at the
+是，另一个问题是
+
+easy end of signal programming that um people still get wrong quite often by
+信号编程的一个简单问题，人们仍然经常犯错误，那
+
+mistake is that the compiler might arbitrarily reorder the the code that it
+就是编译器可能会任意重新排序它
+
+generates it doesn't have to do the loads and stores in the order that you
+生成的代码，它不必执行加载和存储 你
+
+set in your seat program um does anyone know what to do about
+在座位程序中设置的顺序，嗯，有人知道该怎么做吗？
+
+that one and you can see that that in the bogus made up assembler I put on the
+你可以看到，在我放在右边的伪造的汇编程序中，
+
+right there it's just arbitrarily decided to load
+它只是任意决定加载
+
+um to increment um Y and then X and the Sig and whereas in the C program
+um 以增加 um Y，然后 X和 Sig，而在 C 程序中，先
+
+incremented X and then Y and then in the signal hand though I'm you know I'm
+递增 X，然后递增 Y，然后在信号手中递增，尽管我知道我正在
+
+making some assertion that X is always less than or equal to Y but that won't
+断言 X 总是小于或等于 Y，但这不是
+
+be true if you happen to be interrupted in between there the Y and the X being
+真的 如果你碰巧在正在实现的 Y 和 X 之间被打断，
+
+implemented to see what I mean so anyone know what to do about that one
+看看我的意思，这样任何人都知道该怎么做，
+
+um you can
+嗯，你可以，
+
+um we can use the volatile keyword to tell
+我们可以使用 volatile 关键字告诉
+
+the compiler that it's not allowed to reorder those particular loads and
+编译器不允许重新排序 那些特定的加载和
+
+stores
+存储，
+
+um so typically when you're looking at any
+通常，当您查看
+
+variable that's going to be accessed by a signal Handler you'll see this this
+将由信号处理程序访问的任何变量时，您会看到这种
+
+common pattern volatile Sig atomic um that might remind you of the problems
+常见模式 挥发性 Sig 原子um，这可能会提醒您
+
+of multi-threaded programming where you sometimes see things out of order for a
+多线程编程的问题，其中有时您会因为
+
+different reason because the hardware you know because of memory and Hardware
+不同的原因看到事物无序，因为您知道的硬件由于内存和硬件而
+
+reorders the effects of your machine code instructions but that isn't a
+重新排序了机器代码指令的效果，但这不是
+
+problem for that is a problem for multi-threading and that is solved with
+问题，因为这是多线程的问题，可以通过以下方法解决
+
+memory values and so forth but that isn't the problem for
+内存值等等，但这对于
+
+single handlers because interrupt systems maintain the illusion
+单个处理程序来说不是问题，因为中断系统
+
+of serial in order execution so it's a it it's the details differ by
+在顺序执行中保持串行的错觉，所以它的细节因架构而异，
+
+architecture but it's going to behave as if the
+但它的行为就像
+
+um The Interrupters Pro or the signals is run precisely between two and two
+嗯The Interrupters Pro或 信号精确地在两个和两个
+
+separate instructions and you can see everything from before that and nothing
+单独的指令之间运行，您可以看到之前的所有内容，而
+
+from after that so that is not a problem another basic problem with signal
+之后则看不到任何内容，因此这不是问题信号编程的另一个基本问题
+
+programming is that if you are not careful to block signals while running a
+是，如果您在运行信号处理程序时不小心阻塞信号
+
+signal Handler which you can do in a pretty easy way now and we do that in
+你现在可以用一种非常简单的方式做到这一点，我们
+
+progress now you can blow the stack if many signals arrive and the the signal
+现在正在进行中，如果有许多信号到达并且信号
+
+handle starts running and then and then the same signal arrives again and
+句柄开始运行，然后相同的信号再次到达并
+
+interrupts the signal hand there and then that you know the stack grows and
+在那里中断信号手，那么你可以破坏堆栈你知道堆栈会增长并
+
+eventually blows the stack um you know that's that's a pattern
+最终破坏堆栈嗯你知道这是
+
+that's been seen before with postgres a few years back
+几年前在 postgres 中看到的一种模式
+
+um the solution to that is to make sure that it's atomically blocked while while
+嗯解决方案是确保
+
+running it using a more modern um seek action facility from posix
+它在使用更现代的um 运行时被原子阻止 从 posix 寻求操作工具，
+
+um probably one of the worst ones uh well
+嗯可能是最糟糕的之一，嗯，
+
+most of that stuff's pretty well known I suppose so we don't tend to have bugs
+大多数东西都是众所周知的，我想所以我们
+
+around around that area we picked up in code review but there is one category
+在代码审查中发现的那个区域周围不会出现错误，但有一类
+
+that's um that does come up from time to time and the problem is that it's
+是嗯 确实会时不时地出现，问题是这种情况
+
+extremely unlikely but then when when you're really software like that it
+极不可能发生，但是当你真正使用这样的软件时，
+
+someone out there is going to hit it right across large numbers of machines
+有人会在大量机器上遇到这种情况，
+
+which is Deadlocks coming from using locks around signal handlers so if you
+这就是由于在信号周围使用锁而导致的死锁 因此，如果你
+
+if you look at this this program function f is going to function f is
+看一下这个程序，函数 f 将会
+
+running and if the signal Handler happens to run in while we while we hold
+运行，并且如果信号处理程序碰巧在我们在
+
+that mutex in the kind of main program context and then the signal hand that
+主程序上下文中持有该互斥体时运行，然后信号手会
+
+tries to acquire the mutex Well it can't it's going to self-dead login
+尝试 获取互斥体好吧，它不能，它会自死登录，
+
+in the past we've debugged many problems like this in postgres not exactly in in
+过去我们在 postgres 中调试了很多这样的问题，不完全是
+
+this form but in a more hidden form um for example here's a sort of a hidden
+这种形式，而是以更隐藏的形式，嗯，例如，这是一种隐藏的
+
+form we've got a little library of atomic operations but on some operating
+形式上我们有一个小的原子操作库，但在某些操作系统上
+
+systems actually really just um some 32-bit systems and and even then
+实际上只是一些 32 位系统，甚至
+
+some probably older ones by now we emulate that with spin locks and that
+一些可能较旧的系统现在我们用自旋锁来模拟它，这
+
+means that you're actually kind of hiding that risk that you can have a
+意味着你实际上很友善隐藏这样的风险，即您可以
+
+single hand limit Deadlocks against the main execution context
+单手限制主执行上下文的死锁，这是
+
+um another common mistake which is also
+另一个常见错误，这也
+
+really rare because it's you're unlikely to actually have a problem with it but
+非常罕见，因为您不太可能真正遇到问题，但
+
+it is you know something that can happen is if
+您知道可能发生的事情是 如果
+
+you if you're clobbering Global variables that you didn't intend to or
+你正在破坏你不打算这样做的全局变量，或者
+
+um like it's traditional to save and restore or no for example to make sure
+像传统的保存和恢复一样，或者不，例如，为了确保
+
+that you that if the if function f is interrupted
+你在进行系统调用和 then 之间 if 函数 f 被中断
+
+in between making a system call and then checking the the error code from that
+检查来自该
+
+system goal the signal Handler runs and it runs some other system call and that
+系统目标的错误代码，信号处理程序运行并且它运行一些其他系统调用，并且
+
+happens to clobber or no then you can finish up with a
+发生破坏或不发生，那么您可能会得到
+
+maybe a very confusing log message or possibly worse bad behavior and so
+一条可能非常混乱的日志消息或可能更糟糕的不良行为，因此
+
+that's traditionally saved and restored like that
+传统上会保存它 并像这样恢复，
+
+and now we get into the into the much more common area of problems with um
+现在我们进入了
+
+signal programming which is not understanding which things are async
+信号编程中更常见的问题领域，即不理解哪些东西是异步
+
+signal safe which is the set of functions that posix says you're allowed
+信号安全的，哪些是posix 说你可以
+
+to use in a signal Handler um so and the the reason the reason I
+在信号中使用的函数集 处理程序嗯，所以我之前
+
+went through some of that deadlock stuff and so on before is because that makes
+经历过一些死锁之类的事情的原因是因为这使得
+
+it much easier to explain that practically the reason why most of this
+更容易解释，实际上大多数
+
+stuff like what stuff like printf is not okay in a single Handler is because
+像 printf 这样的东西在一个单一的东西中是不好的原因 处理程序是因为
+
+it doesn't say in posix that it's async signal safe and in practice many
+它在 posix 中没有说它是异步信号安全的，并且在实践中许多
+
+implementations will use locks so therefore that program could lock up and
+实现将使用锁，因此程序可能会锁定，
+
+we've seen that kind of thing in postgres many times and debugged many
+我们在 postgres 中已经多次看到这种情况并调试了
+
+variants of that usually it's stuff like e-log you know postgres's internal log
+通常的许多变体 它是像e-log 这样的东西，你知道 postgres 的内部日志，嗯，它
+
+um thing it can it can it might want to allocate some memory so it calls Malik
+可以它可以，它可能想要分配一些内存，所以它在
+
+under the covers somewhere and that Malik is another example is That's a
+某个地方调用 Malik，而Malik 是另一个例子，这是一个
+
+classic example of something that can easily lock up because it it acquires a
+可以轻松锁定的经典例子 因为它在内部获取了一个
+
+mutex inside it so it'll work you can have a program that works perfectly well
+互斥体，所以它会工作，你可以拥有一个
+
+on your machine and then gets out into the wild and you get a few reports of
+在你的机器上完美运行的程序，然后进入野外，你
+
+lock-ups every few weeks or whatever across large numbers of machines it's
+每隔几周就会收到一些关于锁定的报告，或者大量的报告 对于机器来说，这是
+
+unlikely because you've got a you know a Signal's got to arrive and you know and
+不太可能的，因为你知道信号必须到达，并且你知道并被
+
+be caught exactly as the main context holds a lock for a very short sequence
+捕获，因为主上下文持有一个非常短的指令序列的锁，
+
+of instructions but it can happen and then that's pretty nasty
+但它可能会发生，然后这是非常令人讨厌的
+
+um and so an example that we debugged quite
+嗯，所以 我们最近调试的一个例子
+
+recently was um it maybe may seem confusing that that
+是，
+
+we we use system to run some Sub sub programs like archiver commands and
+我们使用系统运行一些 Sub子程序，例如归档器命令之类的
+
+things like that and um there was some code that assumes that
+东西，这可能看起来很令人困惑，并且有一些代码假设
+
+that is um
+这是
+
+async signal safe but uh it's not and that's um quite difficult to it was
+异步信号安全的，但是呃 事实并非如此，这非常困难，
+
+quite difficult to track down and understand
+很难追查和理解，在
+
+um with that particular case there was a really nasty failure uh system and a lot
+这种特殊情况下，系统确实出现了严重的故障，而且
+
+of stuff from libsy you've got to remember that it's
+来自 libsy 的很多东西你必须记住，
+
+it's not Immortal in any way and it's not part of the kernel it's a lot of
+它在任何方面都不是不朽的。 方式，它不是内核的一部分，其中很多
+
+that stuff is just utility stuff running written in C and that you know that
+东西只是用 C 编写的实用程序，你知道它
+
+folks a child process and then it it exits the you know it replaces itself
+是一个子进程，然后它退出，你知道它
+
+using the exit system call in the child process it's just code you could write
+使用子进程中的 exit 系统调用替换自己process 它只是您可以自己编写的代码，
+
+yourself it's just a convenience thing that happens to be in Liberty but if a
+这只是 Liberty 中碰巧发生的一个方便的事情，但是如果在
+
+signal comes along right at that moment between fork and exec and you've got a
+fork 和 exec 之间此时出现一个信号，并且您已经注册了一个
+
+signal Handler registered that signal handle will run in both the parent and
+信号处理程序，则该信号处理程序将在两个进程中运行 父母和
+
+the child if you sent it to the group and there's you know this this confusing
+孩子，如果您将其发送到群组，并且您知道这种令人困惑的
+
+ways to to for things like that to go wrong and in fact there are no
+方式会导致类似的事情出错，事实上
+
+guarantees at all that system should should work correctly
+根本无法保证系统应该
+
+um in the presence of signals
+在存在信号的情况下正常工作
+
+um another thing which was pointed out to me recently is that
+最近向我指出的另一件事是，
+
+we have synchronous signals and asynchronous signals and although Sig
+我们有同步信号和异步信号，尽管 Sig
+
+FPE floating Point exception is is normally uh synchronous signal if it's
+FPE 浮点异常通常是呃同步信号，如果它是
+
+generated by the system it'll be generated because you try and divide
+由系统生成的，那么它会生成，因为您尝试将
+
+something by zero or the a couple of other ways to get floating Point
+某个值除以零 或者
+
+exceptions by doing math stuff but you can send someone Sig FPE as well
+通过做数学工作来获得浮点异常的其他几种方法，但是您也可以向某人发送 Sig FPE，
+
+so if you've written a program where the Handler assumes that it's okay to do
+因此，如果您编写了一个程序，其中处理程序认为可以做一些
+
+stuff because it's a synchronous system signal but you invoke it in an
+事情，因为它是同步系统信号，但是 你以
+
+asynchronous way then then you're you can get in trouble but this is actually
+异步方式调用它，然后你就会遇到麻烦，但这实际上是
+
+a weird hack you can actually send Sig FPE to a postgres backend and it will
+一个奇怪的黑客，你实际上可以将 SigFPE 发送到 postgres 后端，它会
+
+error out or lock up and explode or something
+出错或锁定并爆炸或其他东西，
+
+yeah because it thinks that the only way that cfpe could happen is of course
+因为它认为cfpe 发生的唯一方法当然是
+
+someone divided by zero or or similar out of range stuff
+有人除以零或类似的超出范围的东西，
+
+um that's actually an open issue um
+这实际上是一个悬而未决的问题，还有
+
+there's another category of um weird problem that takes
+另一类奇怪的问题，
+
+so in ancient versions of postgres there used to be lots of places where we would
+所以在古代版本的 postgres 中曾经有很多 我们会
+
+sleep or enter some kind of sleeping system call
+睡觉或进入某种睡眠系统调用的地方
+
+um expecting to be expecting it to return early with e enter the the error
+um 希望它能提前返回 e 输入错误
+
+code meeting signal was received um
+代码 收到会议信号um
+
+as a way to to interrupt that thing and make it make it stop doing whatever it's
+作为中断该事情并使其停止执行任何操作的方法 它正在
+
+doing but it doesn't really work very well it
+做，但它并没有真正工作得很好，它
+
+doesn't work reliably because if that signal is received before the the Sleep
+不能可靠地工作，因为如果在进入Sleep 调用之前收到该信号，
+
+call is entered just like moments before say
+就像之前说的
+
+um and the signal Handler doesn't do anything but you were hoping that you
+那样，信号处理程序不会执行任何操作，但您希望 你本来
+
+were going to interrupt the system call with that well there's a good chance
+打算用这个很好地中断系统调用，但你很有可能
+
+you're going to miss it that just doesn't make any sense so there's a race
+会错过它，这没有任何意义，所以有一个
+
+that needs to be fixed there um
+需要修复的竞赛，嗯，
+
+and um yeah variations of of that problem
+嗯，是的，这个问题的变体
+
+here is a pattern that I've seen quite a few times in my life in different
+在这里 这是我一生中在不同计算机程序中见过很多次的模式
+
+computer programs and it always turns out to be a disaster which is where
+，结果总是一场灾难，
+
+people think that they can have some kind of uh flag that controls what the
+人们认为他们可以有某种呃标志来控制
+
+signal Handler should do and and the like they promised that in certain
+信号处理程序应该做什么他们承诺，在
+
+ranges of the code it's going to and Signal handles will be safe to run
+代码的某些范围内，信号句柄
+
+almost every time this this pattern is used I find over time it breaks down
+几乎每次使用此模式时都会安全地运行，我发现随着时间的推移，它会崩溃，
+
+because you know people the code that that thing calls
+因为你知道人们那个东西调用
+
+people don't realize that it's where it's reached from and
+人们的代码 没有意识到它是从哪里到达的，
+
+um yeah so this type of complexity seems to be
+嗯，所以这种类型的复杂性似乎是
+
+you know long-term source code management seems to be Beyond people's
+你知道的，长期的源代码管理似乎超出了人们
+
+ability to keep straight you know um so
+保持直线的能力，你知道，嗯，所以
+
+I'll put a red line through that um all right so I've told you some of
+我会画一条红线嗯，好吧，所以我已经告诉了你一些关于
+
+the horrible things about horrible details about programming with signals
+信号编程的可怕细节的可怕事情，
+
+um and now I'm going to talk about the the main trick that postgres has to deal
+嗯，现在我要谈谈postgres 必须处理
+
+with most of those things um which is a facility a facility called
+大多数这些事情的主要技巧，嗯，这是一个 设施 一个叫做
+
+latches which was committed in 2010 uh by hiki who I don't think is here but uh
+闩锁的设施，是由 hiki 在 2010 年提出的，我认为他不在这里，但是
+
+he's so he's around somewhere at this conference
+他就在这次会议的某个地方，
+
+um and so these latches are um
+所以这些闩锁是
+
+uh an abstraction where there's a flag in shared memory and it can be in shared
+一个抽象概念，在共享内存中有一个标志，它 可以在共享
+
+memory it can be in back-end local memory and you can wait for it to be set
+内存中，也可以在后端本地内存中，您可以等待它被设置，
+
+and if somebody else sets it that's the abstraction you can't miss it there's no
+如果其他人设置了它，那就是抽象，您不能错过它，
+
+way you can miss it um but there's no signal Handler that it
+您不可能错过它，但是没有信号 它
+
+happens to use signals under the covers but in a safe way which I'll describe in
+碰巧在幕后使用信号，但以一种安全的方式，我稍后将对此进行描述，
+
+a moment but it um that one on Unix and on Windows it uses
+但在 Unix 和 Windows 上，它使用
+
+something native to Windows called Windows events which are pretty much
+Windows 本地的某种称为Windows 事件的东西，这几乎是
+
+exactly the same thing as latches so basically it's a it's a flag and memory
+完全相同的东西 作为锁存器，所以基本上它是一个标志和内存，
+
+you can say is it set yet if so you know you can
+你可以说它是否已设置，但如果是这样，你知道你可以
+
+do whatever you need to do immediately and if it's not set you can wait for it
+立即执行你需要做的任何事情，如果它没有设置，你可以
+
+in a safe way that doesn't have any race Okay so
+以一种安全的方式等待它，没有好吧，所以
+
+I should point out that latch is an unusual word in postgres because in as
+我应该指出，闩锁在 postgres 中是一个不寻常的词，因为据
+
+far as I know every other relational database Community they use the word
+我所知，所有其他关系数据库社区他们使用闩
+
+latch for a mutex or what we call a lightweight lock some type of very small
+锁这个词来表示互斥体或我们所说的轻量级锁，某种类型的非常小的
+
+lock that doesn't like a fast kind of lock that doesn't have deadlock
+锁， 不喜欢没有死锁
+
+detection or anything like that I think that term I've just been Googling this
+检测或类似的东西的快速锁我认为这个术语我刚刚在谷歌上搜索
+
+trying to figure it out I think that term came from mainframes system R and
+试图找出它我认为这个术语来自大型机系统 R
+
+then I think all those systems that kind of in the 70s and 80s that were heavily
+然后我认为所有 那些在 70 年代和 80 年代深受系统
+
+influenced by system are accidentally copied the Mainframe term for a mutex
+影响的系统意外地复制了互斥体的大型机术语，
+
+but we didn't and so we we've now used latch in this new and different way and
+但我们没有，所以我们现在以这种新的、不同的方式使用闩锁，
+
+you can find the word latch being used in other meanings and other concurrency
+您可以找到 单词闩锁被用于其他含义和其他并发
+
+things which is really not that helpful but um here we
+事物，这确实没有那么有帮助，但是嗯，我们在这里，
+
+are I think our meaning of latch is probably
+我认为闩锁的含义可能是
+
+anyone know Electronics I think a latch is that like something you set and it
+任何人都知道的电子产品，我认为闩锁就像您设置的东西一样，它
+
+would stay set until you clear it so yeah
+会保持设置直到您 清除它，所以是的，
+
+yeah some it's like a flip-flop that stays
+有些就像一个触发器，保持
+
+yeah so I think I think that's the idea with
+是的，所以我想我认为这就是那个想法，
+
+that which is yeah um but I'd have to ask keiki and he's
+是的嗯，但我必须问keiki，他
+
+not here yeah all right so one interesting thing
+不在这里，是的，所以关于锁存器的一件有趣的事情
+
+about latches um in the first in 2010 they weren't quite yet but the way we
+嗯，在 2010 年的第一个版本中，它们还没有完全实现，但就我们
+
+have them now they're multi-flexible with sockets and pipes and postgres
+现在拥有它们的方式而言，它们具有套接字和管道的多重灵活性，并且 postgres
+
+spends a lot of time thinking about sockets and pipes and waiting for them
+花费了大量时间考虑套接字和管道并等待它们
+
+to be ready to supply a query or be ready to write data out to and so on so
+准备好提供 一个查询或准备好写入数据等等，所以
+
+if we only wanted a race free way to wait for someone to send us a signal
+如果我们只想要一种无竞争的方式来等待某人向我们发送信号而
+
+without getting confused and an easy way to program we could just use Sig weight
+不会感到困惑，并且是一种简单的编程方式，我们可以只使用 Sig 权重，
+
+but that wouldn't be multiplexable or see timed weight or something so we
+但这不会' 不能多路复用或看到定时重量或其他东西，所以我们
+
+usually in fact always want to wait also for soccer at least a socket or a pipe
+通常实际上总是想等待足球至少一个套接字或管道
+
+um I'll explain why in a moment alternatively we could have decided to
+嗯我会解释为什么一会儿或者我们可以决定
+
+give every backhand a socket pair or a pipe or something like that and if you
+给每个反手一个套接字对或管道或类似的东西，如果你
+
+want to wake up that other um back end then you write a byte into
+想唤醒另一个后端，那么你可以在其中写入一个字节
+
+it or something like that and then they could use that in
+或类似的东西，然后他们可以在
+
+multi-flexible interfaces like pole and select and so on
+多灵活的接口中使用它，例如极点和选择等等，
+
+um but I don't think that would be very nice because you'd have to have a pipe
+但是我 不认为这很好，因为你必须
+
+for every other back end so imagine if you had thousands of back ends because
+为每个其他后端都有一个管道，所以想象一下，如果你有数千个后端，因为
+
+that's your max backend number you'd have to have thousands and thousands of
+这是你的最大后端数量，你必须有成千上万个
+
+these pipes and that would be probably not very good um I mean I know we do
+这样的管道 这可能不太好，嗯，我的意思是，我知道我们确实
+
+open thousands of files but we have a system for like at least recently used
+打开了数千个文件，但我们有一个系统，至少最近使用过的
+
+thing to make sure we stay under some limit but we wouldn't be able to do that
+东西可以确保我们保持在一定的限制之下，但我们无法做到这一点
+
+for this so that's that's why we don't do that
+这就是为什么我们不这样做，所以
+
+um so the nice thing about using um
+使用um
+
+signals as a way to wake up another process is that the only thing you need
+信号作为唤醒另一个进程的好处是，
+
+the only thing you need to know is the the PID of the recipient
+你唯一需要知道的是接收者的 PID，
+
+and the receiver has there's various ways that they can use a self-pipe or a
+接收器有多种方式可以使用自管道或
+
+signal FD or a KQ thing that deals with signals they can Multiplex that easily
+信号 FD 或 KQ 来处理信号，他们可以轻松
+
+using nice modern interfaces um
+使用漂亮的现代接口进行多路复用，
+
+not the most modern interfaces but quite modern interfaces
+不是最现代的接口，而是相当现代的接口，
+
+um and they can Multiplex that with sockets and so forth so um these latches
+他们可以多路复用 带有插座等等所以嗯这些闩锁
+
+um yeah they're very simple things you can reset them you can
+嗯是的它们是非常简单的东西你可以重置它们你可以
+
+check your you can um you know check your work condition that
+检查你的你可以嗯你知道检查
+
+you're waiting for and then you can go to sleep and wait and you can advertise
+你正在等待的工作条件然后你可以去睡觉并等待 你可以宣传
+
+what you're waiting for and if you look in the PG stat activity View and
+你正在等待的内容，如果你查看 PG 统计活动视图和
+
+postgres you'll see um all of the idle back ends idle
+postgres，你会看到
+
+processes involved in postgres will be showing what they're doing with that
+postgres 中涉及的所有空闲后端空闲进程将显示它们正在对该权
+
+weight event ID so you can sort of see where in the source code basically it's
+重事件执行什么操作 ID，这样你就可以看到源代码中的基本上它
+
+waiting in one of these weightlift weight latch calls and that should be
+在这些举重锁存器调用之一中等待，这应该是
+
+the main way almost everything in postgres that's idle should be waiting
+postgres中几乎所有空闲的东西都应该等待的主要方式，
+
+um all right so this this latch mechanism
+嗯，所以这个锁存器机制
+
+and the ability to Multiplex it and wait for multiple things at the same time it
+和能力 复用它并同时等待多个事情，
+
+I think in the beginning it was probably done with select I didn't actually check
+我认为一开始它可能是通过 select 完成的，我实际上并没有检查
+
+that pretty sure it was selected before we don't do that anymore so um on
+它是否在我们不再这样做之前确定它已被选择，所以嗯
+
+basically on on all modern operating systems we use epol K event or the
+基本上是在 所有现代操作系统我们都使用 epol K 事件或
+
+windows thing to wait for multiple multiple objects
+windows 事件来等待多个多个对象，
+
+um so we and here I'm showing a this thing called a weight event set and
+所以我们在这里展示一个称为权重事件集的东西，
+
+we're waiting for this is like an idle postgres backend waiting for you to send
+我们正在等待这就像一个空闲的postgres 后端等待 让你向
+
+it a query or someone else some other process to tell it to do something
+它发送一个查询或向其他人发送一些其他进程来告诉它做某事
+
+or to find out that the postmaster has exited early because that's the
+或发现邮政局长已经提前退出，因为这就是
+
+situation used to be in the in the old days I think uh I think it might have
+过去的情况我想呃我认为它可能有
+
+been Peter gagan who did this it used to be in the old days that if the
+彼得·加根（Peter gagan）这样做了，在过去，如果
+
+postmaster crashed which we don't expect to happen it's a bad thing but somehow
+邮政局长崩溃了（我们不希望发生这种情况），那是一件坏事，但不知何故，
+
+if it crashes maybe that's maybe the operator killed it with kill
+如果它崩溃了，也许操作员用kill
+
+-9 or something all of the child processes would be many of those used to
+-9或其他东西杀死了它 子进程中的许多子进程将是许多曾经
+
+hang around and gradually die off in some horrible way uh whereas now
+闲逛并以某种可怕的方式逐渐消失的进程，呃，而现在，嗯，
+
+um pretty much whenever they're idle they'll they'll they want to know if the
+每当他们空闲时，他们就会想知道
+
+postmaster has gone away so they that's why they have this pipe connected to the
+邮政局长是否已经离开，所以他们 这就是为什么他们把这个管道连接到
+
+person the pipe is never used for any purpose apart from knowing when it's
+人身上，除了知道它什么时候完成之外，管道从来没有用于任何目的，
+
+finished you know so that means that pretty much anytime
+你知道，这意味着几乎任何时候
+
+we're waiting idly we're waiting for basically three things at least
+我们无所事事地等待，我们基本上都在等待三件事，至少
+
+um the latch the client socket and this link to the postmaster so we want a way
+嗯 锁住客户端套接字和到邮局主管的链接，所以我们想要一种方法
+
+to do that quite efficiently um and in modern systems we used to use
+来非常有效地做到这一点，在现代系统中，我们曾经使用
+
+pole but in in the last few years we've changed to using these stateful things
+极点，但在过去几年中，我们已经改为在遇到问题时使用这些有状态的东西
+
+where we had problems with um very large computers with multiple
+嗯，
+
+sockets when we used to use pole if you imagine you've got loads and loads of
+当我们使用极点时，带有多个套接字的非常大的计算机，如果你想象你有大量的
+
+processes and they're all calling Paul with these same three things all the
+进程，它们总是用这三件事来调用保罗，
+
+time and the postmaster pipe is actually every time you enter poll every time any
+而邮政主管管道实际上每次你 每次任何后端空闲时都进入轮询
+
+back end became idle and imagine this say hundreds of them and they're
+，想象一下这说的是数百个后端，它们在
+
+becoming idle in not idle and idler not rapidly every time they would enter the
+每次进入内核时都在不空闲和空闲状态下变得空闲，而不是很快，
+
+kernel they would um they would have to briefly lock the
+它们将不得不短暂锁定
+
+pipe that the other end like is the postmaster still there like they have to
+另一个管道 最后好像邮政局长还在那里，就像他们必须在
+
+internally pull it I mean I'm using the word pole again
+内部拉动它一样，我的意思是我再次使用“极”这个词，
+
+point we ended up using something called myself
+我们最终使用了一个叫做“我自己”的东西，哎呀，
+
+oops sorry
+抱歉，嗯，
+
+huh well um
+嗯，
+
+what I was going to say is with the um stateful version of those interfaces
+我要说的是有状态版本的 这些接口
+
+epol and Kevin you you don't every time you enter the kernel it's
+epol 和 Kevin 你每次进入内核时都不会，它
+
+it's basically turns it because it's stateful it kind of turns it around
+基本上会转动它，因为它是有状态的，它会在
+
+within the kernel so instead of it's like
+内核内转动它，所以不像
+
+don't call us we'll call you kind of thing inside the kernel so imagine each
+不要打电话给我们，我们会打电话给你因此，想象一下每个
+
+back end is repeatedly going into the into its idle state in between queries
+后端在查询之间重复进入其空闲状态，
+
+and it doesn't have to go and lock the postmaster's pipe briefly to check if
+并且它不必短暂锁定邮局管理员的管道来检查
+
+it's still there or to check what a state is instead it's the other way
+它是否仍然存在或检查状态是什么，而是
+
+around if the postmaster goes away then the kernel will find all of the e-poll
+相反，如果邮政局长离开，那么内核将找到所有需要知道这一点的电子民意调查
+
+sets that uh that need to know about this until then which is an extremely
+集，直到那时，这是一个极其
+
+rare event so that way you save some CPU that turned out to be a problem only on
+罕见的事件，这样您就可以节省一些 CPU，而这些 CPU被证明是一个 问题只出现在
+
+um pretty big systems so uh
+相当大的系统上，所以
+
+yeah right and that it's common to have three
+嗯，是的，目前
+
+like the most common use of weight event sets at the moment is is those three
+最常见的权重事件集是三个，这三个
+
+things in an idle back end or in any any back end but there are also other uses
+事件是在空闲后端或任何后端中，但也有
+
+for weight event sets where you can have very large numbers of sockets because
+权重事件集的其他用途，您可以拥有大量套接字，因为
+
+you've you're running sharded queries and you're waiting for like you're doing
+您正在运行分片查询并且您正在等待，就像您正在对
+
+an append over many shards and excuse me each shot is on a different server and
+许多分片进行附加操作一样，请原谅，每个镜头都在不同的分片上 服务器并
+
+waiting for sockets to give you data and so on so there's some possible
+等待套接字为您提供数据等等，因此
+
+efficiencies by by doing that all right so moving on to
+通过这样做可能会提高一些效率，所以继续讨论
+
+PM signals we have this concept of uh so I talked
+PM 信号，我们有这个概念，所以我谈到
+
+about Sig like raw basic signals but then we have this thing called a PM
+了 Sig 就像原始基本信号一样，但是我们有了这个东西 称为 PM
+
+signal which is how you ask which is how regular backends ask the postmaster to
+信号，这就是您询问的方式，这就是常规后端如何要求邮政局长
+
+do something and for example start autovac worker is one of the PM signals
+做某事的方式，例如启动autovac 工作人员是 PM 信号之一
+
+and the way that works is basically we just wanted to send a signal Sig user
+，其工作方式基本上是我们只想发送信号 Sig 用户
+
+one but we wanted to map that to many different kind of virtual signals just
+一，但是 我们想将其映射到许多不同类型的虚拟信号，只是
+
+because we didn't have you only get to use the user one and six user two you
+因为我们不让您只能使用用户一和六个用户二，您
+
+don't get to use it's a user 50. you can't just make more
+不能使用它是用户 50。您不能只制作更多
+
+of them there's a fixed number of them so we have our own little scheme where
+其中有固定数量，所以我们有自己的小方案，其中
+
+there's some flags and you can just say right I want an autovac worker please
+有一些标志，您可以说对，我想要一名自动真空吸尘器工作人员，
+
+and then your sensor user one the postmaster Sig user one Handler
+然后您的传感器用户一个邮政局长 Sig 用户一个处理程序
+
+it does things that are okay to do in a single Handler we know that they're not
+它会做一些可以的事情 在单个处理程序中执行的操作我们知道它们没有
+
+buggy we know that it's you know we're not going to run into any of the
+错误我们知道这是你知道的我们不会遇到
+
+problems with signal programming all it does is
+信号编程的任何问题它所做的只是
+
+sets of um sets a flag to know to know what what's
+设置一个标志来知道什么是
+
+um yeah it's basically just sets its own
+嗯，是的，它基本上只是设置自己的
+
+latch and that allows its its own way to vent set weight to to return so
+闩锁，并允许以自己的方式发泄设定的重量以返回，所以
+
+um that I've put this um Rube Goldberg picture here because I
+嗯，我把这张鲁布·戈德堡的照片放在这里，因为我
+
+find that a little bit odd like we send a signal to a process and then
+发现这有点奇怪，就像我们发送信号一样 一个进程，然后
+
+that processor signal Handler sets its own latch so that it wakes up why don't
+该处理器信号处理程序设置自己的锁存器，以便唤醒它，为什么
+
+we just set the latch first but that's why don't we just set the latch directly
+我们不先设置锁存器，但这就是为什么我们不直接
+
+from the sending process and that's something we probably could do um it's
+从发送进程设置锁存器，这就是我们可能可以做的事情 嗯，这是
+
+something we might look into the in in the future the idea the argument against
+我们将来可能会研究的事情，反对
+
+it is that the postmaster shouldn't be using it shouldn't be accessing memory
+它的观点是，邮政局长不应该使用它，不应该访问内存
+
+that it's supposed to be quite robust in in the event of child processes going
+，在子进程完全运行的情况下，它应该是相当健壮的
+
+completely nuts and trashing memory but that argument is a bit weird because the
+坚果和垃圾内存，但这个论点有点奇怪，
+
+because it is already depending on the state of shared memory with these PM SQL
+因为它已经取决于这些 PM SQL 标志的共享内存的状态，
+
+Flags so I don't know that's that's small Improvement we could perhaps look
+所以我不知道这是一个小小的改进，我们也许可以考虑
+
+at making one day another thing which comes up more commonly is
+有一天做另一件事更常见的是
+
+um oh which is used more often I should say is proc signals
+um oh，更常用的是 proc 信号，
+
+this is a way for um back ends to ask each other to do
+这是 um后端要求彼此
+
+something so for example there's there's a proc signal for please log your memory
+做某事的一种方式，例如有一个 proc 信号，请记录你的内存
+
+context and it's it's the same it use we send Sig user one the Sig user one
+上下文，它就是 与它使用的相同，我们发送 Sig 用户一 Sig 用户一
+
+Handler sets a flag somewhere
+处理程序在某处设置一个标志，
+
+uh checks the flag and shared memory to see what kind of request it is and then
+呃检查标志和共享内存以查看它是什么类型的请求，然后
+
+sets its own latch and that what the effect of that is that
+设置自己的锁存器，这会产生什么效果，
+
+um
+
+
+sorry it sets an interrupt flag which means next time the code hits a check
+抱歉 它设置了一个中断标志，这意味着下次代码遇到
+
+for interrupt which is something I'll talk about in a moment
+中断检查时，我稍后会讨论
+
+there's something for it to do and it'll dispatch off to do the thing and in this
+它有一些事情要做，并且它会分派去做这件事，在这种
+
+case that means that it'll log the memory context at the next suitable
+情况下，这意味着 它会在下一个合适的时刻记录内存上下文，
+
+moment um
+嗯，
+
+again there's probably an opportunity to skip a step there it's a little bit
+可能有机会跳过一个步骤，这有点
+
+confusing um
+令人困惑，嗯，
+
+there are still I said that um the Sig user one Handler only
+仍然有我说过，嗯，Sig用户一个处理程序只
+
+sets a couple of flags and sets its latch but there are still a couple
+设置了几个标志并设置了它的闩锁，但仍然有几个
+
+places a couple of places where it does complicated things and those places are
+地方，几个地方，它做复杂的事情，这些地方
+
+basically bugs and should be fixed and we're working on that
+基本上是错误，应该修复，我们正在努力，
+
+um no sorry
+嗯，不抱歉，
+
+um all right so there's one special kind of pro signal that I wanted to highlight
+好吧，所以有一种特殊的专业信号，我 想强调
+
+which is proximal barrier which is something we added uh quite recently and
+哪个是近端屏障，这是我们最近添加的东西，
+
+the the main use of it at the moment is to
+目前它的主要用途是
+
+um it's a it's like a really system-wide
+嗯，它就像一个真正的系统范围的
+
+proc signal where you send a proc signal to every single back end in the whole
+过程信号，您可以在其中向每个后端发送一个过程信号在整个
+
+system and you say can you please do this thing and then
+系统中，你说你能做这件事吗，然后
+
+tell me when you've done it and then you wait for them all to do it which is a
+告诉我你什么时候做完，然后你等待他们所有人都做这件事，这是一种
+
+really Sledgehammer kind of a thing you don't really want to be using this very
+真正的大锤式的事情，你不想成为这样的事情 经常使用这个，
+
+often but it's something we needed to solve a couple of really tricky problems
+但我们需要它来解决几个非常棘手的问题，其中
+
+um one one of them was a Windows specific problem because Windows has
+一个是 Windows特定的问题，因为 Windows 有
+
+strange problems I'm linking things when files are open so sometimes there's
+奇怪的问题，我在文件打开时链接事物，所以有时
+
+nothing else you can do but just get every single process in the whole system
+你无能为力，但 只要让整个系统中的每个进程都
+
+to right let's just close the live files and then yeah
+正确，让我们关闭实时文件，然后是的，嗯，
+
+um but there are also some other problems
+但是还有一些其他问题，
+
+some some some weird edge cases when you like uh it's not really worth going into
+一些一些奇怪的边缘情况，当你喜欢的时候，呃，这并不值得深入，
+
+but there's some of the cases where we need to use that
+但有一些情况 我们需要使用它，
+
+um so essentially the reason I'm mentioning
+嗯，本质上，我提到
+
+this is because you can see that we have cases now where we're actually
+这一点的原因是因为你可以看到，我们现在实际上
+
+asking every process in the whole system to do to do something and we're waiting
+要求整个系统中的每个进程做某事，而我们正在等待
+
+for it to reach its next check for interrupts
+它 为了达到下一个中​​断检查的目的，
+
+so check for interrupts sometimes we say CFI for short because that's so long
+所以检查中断有时我们简称为CFI，因为它太长了
+
+um so basically it's a kind of a
+，所以基本上它是
+
+programming rule for postgres that you you just you have to cooperate with the
+postgres 的一种编程规则，你必须与
+
+interrupt system like every process in the system is going to have to cooperate
+中断系统合作，就像系统中的每个进程一样。系统必须
+
+with the interrupt system um otherwise you can
+与中断系统配合，否则你可能会
+
+like kind of hang things like if someone's waiting for your process to do
+喜欢挂起一些东西，比如有人在等待你的进程
+
+something especially the barrier case where someone's waiting for every
+做某事，特别是有人在等待每个
+
+process to do something but there are other cases as well like being
+进程做某事的屏障情况，但也有其他情况 就像
+
+interruptable by um hitting Ctrl C and so forth
+按 Ctrl C 等可以中断，
+
+um so basically throughout the postgres
+所以基本上在整个 postgres
+
+source code you'll see check for interrupts at various places where
+源代码中，你会看到在不同的地方检查中断，
+
+people have decided it's a safe spot and a regularly visited enough spot
+人们认为这是一个安全的地方，并且是一个经常访问的足够的地方
+
+to stick one of these checks I usually check for interrupts does nothing
+来坚持其中一项检查我 通常检查中断不会执行任何操作，
+
+because there's no interrupts have been sent to that process
+因为没有中断已发送到该进程，
+
+but if they are then um you know if one of the if the Sig user one Handler has
+但是如果有中断，那么嗯，您知道如果 Sig 用户一个处理程序拥有的其中之一让
+
+has you know caught six years one and set um
+您知道捕获了六年一并
+
+set the interrupt flag then it could be that you that that you'll
+设置了中断标志，那么可能是你会
+
+error out at that spot throw an error or it could be that your back end will
+在那个地方出错抛出一个错误，也可能是你的后端
+
+actually die if that's something really bad like a fatal error because there's a
+实际上会死掉，如果这是像致命错误这样非常糟糕的事情，因为有
+
+couple of ways that things can go wrong including recovery conflicts and some
+几种方法可能会出错，包括 恢复冲突和
+
+other things that can lead to lead to those outcomes so that's why we've got
+其他一些可能导致这些结果的事情，所以这就是为什么我们必须
+
+to choose some reasonable points where it would be where those outcomes would
+选择一些合理的点，这些结果是
+
+be acceptable um but most there are also cases where
+可以接受的，但是大多数情况下，
+
+check for interrupts causes it causes us to do something like handle that request
+检查中断会导致它导致 我们做一些事情，比如处理
+
+to close all your files which is like um not fatal or it's not an error it's
+关闭所有文件的请求，这就像嗯不是致命的，或者这不是一个错误，
+
+nothing it's just work you've been asked to do and you do it at that point you
+没什么，这只是你被要求做的工作，而你在那时就这样做了，你
+
+don't even really realize and then um check for interest returns there's a
+甚至没有真正意识到 然后，嗯，检查利息回报，还有
+
+couple of other details about that you can for since check friend traps is
+一些其他细节可供您查看，因为检查朋友陷阱
+
+scattered throughout the code and we might reach a function that runs it and
+分散在整个代码中，我们可能会找到一个运行它的函数，
+
+but we might not actually be in a safe spot to to handle these requests
+但实际上我们可能并不处于安全的位置来处理 这些请求
+
+there's a couple of ways that um interrupts can be suppressed temporarily
+有几种方法可以
+
+explicitly by holding and resuming and also by
+通过保持和恢复以及
+
+whenever you hold an LW lock which is a short-term lock used for I mean used for
+每当你持有 LW 锁时暂时显式地抑制中断，这是一个短期锁，用于我的意思是用于
+
+um you know synchronizing or locking small
+嗯你知道同步或锁定
+
+small areas of like shared memory changes and so forth we won't
+小区域 像共享内存更改等等，我们不会
+
+allow check for interrupts to you know error out or anything in that
+允许检查中断，以便您知道错误或任何在这种情况下的
+
+case so that's like a super quick tour of the
+情况，因此这就像对 IPC 设施的超级快速浏览，
+
+IPC facilities that I felt I could squeeze into talk of this length I
+我觉得我可以挤进去谈论这个长度，我
+
+decided not to go into locks as well because that's a such a big topic
+决定 也不要讨论锁，因为这是一个很大的话题，
+
+um but those Yeah by by the sort of
+嗯，但是随着
+
+latification over time like making more and more use of of apis either directly
+时间的推移，这些是的，随着时间的推移，越来越多地使用 api，要么直接
+
+latches or several other apis built on top of that over the past few years
+锁存，要么在过去建立在其之上的其他几个 api 几年来，
+
+we've been making postgres a lot more efficient and
+我们一直在使 postgres 变得更加高效，并
+
+um chasing out bugs that came from having all kinds of logic and Signal
+消除由于拥有各种逻辑和信号
+
+handlers although we're not finished doing that
+处理程序而产生的错误，尽管我们还没有完成这项工作，
+
+um so some of the improvements that we might make next or we're sort of looking
+所以我们下一步可能会做出一些改进，或者我们' 正在
+
+into include maybe maybe there's some more fine-grained control of of check
+研究包括，也许有一些更细粒度的中断检查控制，
+
+for interrupts um with there are some places where we where we hold off
+嗯，在某些地方，我们会
+
+interrupts for a while because we're in the middle of cleaning up some files or
+暂时推迟中断，因为我们正在清理一些文件或
+
+something like that and it might take a while but we don't want to leak those
+其他东西 像这样，可能需要一段时间，但我们不想在被中断时泄漏这些
+
+files if if interrupted so we did hold interrupts but which is kind of the old
+文件，所以我们确实保留了中断，但这是
+
+way of thinking from the past but now now we're like we've got these these
+过去的旧思维方式，但现在我们就像我们已经有了 这些
+
+barriers might come along someone might be waiting waiting for every process to
+障碍可能会出现，有人可能正在等待每个进程的
+
+reply so you know it's not that great to be holding interrupts in various places
+回复，所以你知道在不同的地方保持中断并不是那么好，
+
+so it feels like we need something more fine-grained like you can you can run
+所以感觉我们需要像你这样更细粒度的东西，你可以运行
+
+some kinds of interrupts but not others and we haven't really designed a good
+某些类型的东西 中断，但不是其他中断，我们还没有真正为此设计一个好的
+
+system for that yet so um one area that I'm kind of looking at
+系统，所以我正在考虑
+
+kind of starting to research for posterior 17 is some kind of
+开始研究后验 17 的一个领域是某种
+
+multi-flexible sub process module so that we can run sub programs
+多灵活的子流程模块，以便我们 可以运行子程序，
+
+like archiving scripts or or copy from program is a way to run a sub-program a
+例如归档脚本或从程序复制是一种运行子程序子
+
+sub process at the moment if any of the if you do any of those things then
+进程的方法，如果您执行任何这些操作，那么
+
+um we actually we actually completely failed to process interrupts while while
+我们实际上完全无法处理中断，而 虽然
+
+those things are happening and that's that used to be kind of acceptable in
+这些事情正在发生，但这在过去是可以接受的，
+
+the past when we were doing less communication between back-ends and when
+当时我们在后端之间进行的通信较少，而且
+
+we didn't have the that barrier thing which is now now sort of can hang you up
+我们没有现在那种可以让你挂断的障碍，
+
+so that's that's a bit of a bit of an omission and something we really need to
+所以这就是 这是一个有点遗漏，我们确实需要
+
+tidy up so um
+整理一些东西，所以嗯，
+
+as I mentioned before there's possibly a couple of opportunities to simplify some
+正如我之前提到的，可能有一些机会来简化
+
+of that stuff that proc signals and PM signals like it does seem kind of weird
+proc 信号和 PM 信号的一些东西，就像它对我来说确实有点奇怪一样
+
+to me that we have we call signals and then these signals the latch of the same
+我们有我们称之为信号的信号，然后这些信号是同一个过程的锁存器
+
+process and you know just for historical reasons that could perhaps be tidied up
+，你知道，只是出于历史原因，也许可以整理一下
+
+um and the reason I'm kind of motivated to
+嗯，我有动力
+
+to think about that is that we have all this stuff to pretend that Windows is
+去思考这个问题的原因是，我们拥有所有这些 假装 Windows 是 UNIX 的东西，
+
+UNIX and I think that made a lot of sense
+我认为
+
+when postgres was ported to Windows because that was just a absolutely
+当 postgres 被移植到 Windows 时，这很有意义，因为这绝对是一项
+
+Mammoth task like I can't believe uh Magnus pulled that off and it it he did
+艰巨的任务，就像我不敢相信Magnus 成功完成了这一任务，而他
+
+that by supplying a whole lot of unixie stuff for Windows which is good
+通过提供Windows 上有很多unixie 的东西，这很好，
+
+but now I'm not sure that now that we have now that we have abstractions for
+但现在我不确定现在我们已经有了
+
+things like weight of nsets that know how to report different kinds of events
+像 nsets 的权重这样的抽象，它们知道如何报告不同类型的事件，
+
+I'm not really sure we it's the best idea to be pretending that you've got
+我不确定我们是否是这样 最好的办法是假装你有
+
+Sig child when Windows actually has its own way of telling you that a child
+Sig 子进程，而 Windows 实际上有自己的方式告诉你子
+
+process died or exited and maybe wait events Edge just abstract that and it
+进程已死亡或退出，也许还有等待事件 Edge 只是抽象了这一点，它
+
+could do it the Unix way or the windows way like what we why don't we pack all
+可以以 Unix 方式或 Windows方式做到这一点 就像我们为什么不把所有
+
+of those kind of a kernel event type things into this new obstruction that
+这些内核事件类型的东西打包到我们已经得到的这个新的障碍中，
+
+we've got rather than um having this additional weird code
+而不是嗯有这个额外的奇怪的代码，
+
+that no one really understands that's pretending to be Unix that's that's kind
+没有人真正理解它假装是 Unix，那就是
+
+of what um well while trying to maintain that
+这样的嗯，在尝试维护该
+
+code that's kind of what led me down the path of thinking Hmm well why don't I
+代码时，这让我走上了思考之路，嗯，好吧，为什么我
+
+just like if latches are the only thing we actually really need then maybe we
+不喜欢如果锁存器是我们真正需要的唯一东西，那么也许我们
+
+should actually try and figure out how to get rid of all of them uh the signal
+应该尝试找出如何 摆脱所有这些呃信号
+
+sorry yeah
+抱歉是的
+
+one non-magic action that has a magic one
+一个非魔法动作有一个魔法动作
+
+and the non-magic action is basically setting a flag
+并且非魔法动作基本上是设置一个标志
+
+self-pyped create some event s
+自我pyped创建一些事件是的，
+
+yeah and it seems as if that meant to do from
+似乎这意味着从
+
+uh well yeah so
+嗯，是的，所以
+
+when you're waiting for a latch and another another process sets the
+当你在等待闩锁时，另一个进程设置了
+
+flag that the non-magic part it then just kills you I mean we use Sig urge
+非魔法部分的标志，然后它就会杀死你，我的意思是我们使用 Sigurg
+
+and your your weight event set um
+和你的体重事件集，嗯
+
+we have it on on Linux we have a signal FD because we don't I'm trying to cut
+我们在 Linux 上有它 有一个信号FD，因为我们没有 我正在尝试
+
+down signal handlers and that kind of stuff so like a signal Lefty gives you a
+减少信号处理程序和类似信号之类的东西 Lefty 为您提供了一个
+
+nice um
+很好
+
+a nice way to consume signals that just goes into an e-poll set and yeah so
+的方式来消耗刚刚进入电子投票集的信号，是的 因此，
+
+that's the direct way for someone another process to settle at and wait a
+这是另一个进程安顿下来并等待
+
+waiter up um it actually only does that if there
+服务员的直接方式，嗯，它实际上只
+
+were if in recent versions there's a flag to say to say if you might be
+在最近版本中存在一个标志来表示您是否可能正在
+
+waiting it only bothers to do the system call if you might be waiting you've got
+等待时才会这样做，它只需要进行系统调用 如果你可能在等待，你必须
+
+to advertise you might waiting so it's a little little two-step dance of flags
+做广告，你可能会等待，所以这是一个小小的两步旗帜舞蹈，
+
+but to make it uh sort of race free way to but while also minimizing system
+但要使它成为呃一种无竞争的方式，同时也最大限度地减少系统
+
+calls and that um seems to work pretty well
+调用，而且嗯似乎工作得很好
+
+um the two-step thing that I was complaining about on the previous slide
+嗯，我在上一张幻灯片中抱怨的两步问题
+
+is that um in some cases we have this thing we
+是，嗯，在某些情况下，我们有一个
+
+call proc signal where you you set a different flag and shared memory and
+称为 proc 信号的东西，您可以在其中设置不同的标志和共享内存，
+
+then you you
+然后将
+
+send Sig user one to the process and its signal Handler then sets its own latch
+Sig 用户 1 发送到进程 然后它的信号处理程序设置它自己的锁存器，
+
+and it's just a it doesn't really make sense anymore right I mean it's not not
+这只是一个它不再有意义了，我的意思是它也不是
+
+particularly performance critical either but
+特别关键的性能，但是
+
+when I began to think about whether we could just I I've been doing a lot of
+当我开始考虑我们是否可以只是我时，我已经做了很多
+
+cleaning up with old code and
+清理旧代码，
+
+yeah yeah yeah all right so that's actually the last
+是的，是的，好吧，所以这实际上是最后一张
+
+slide um
+幻灯片，嗯，
+
+I wonder if anyone has any other questions
+我想知道是否有人还有其他问题，
+
+uh for example I didn't commit people and
+呃，例如，我没有委托人，经验
+
+what was the rule of thumb some exam some examples of using uh latch to work
+法则是什么，一些考试，一些使用呃的例子 闩锁来工作
+
+another person why do we need okay so an example would be
+另一个人为什么我们需要好的所以一个例子是
+
+in a parallel query for example um uh multiple processes are running
+在并行查询中例如嗯呃多个进程正在运行
+
+cooperating to execute your query and they
+合作执行你的查询，他们
+
+um there are some sometimes when they they need to wait for each other like
+嗯有时他们需要互相等待，就像
+
+maybe the scanning a b tree and like they they take a page and and
+也许 扫描 b 树，就像他们一样，他们会占用一页，
+
+while one you know there's some protocol for working for they try to avoid
+虽然你知道有一些工作协议，但他们试图避免
+
+sleeping and and wasting time but sometimes they need to
+睡觉和浪费时间，但有时他们需要
+
+um uh
+嗯呃
+
+notify each other that I don't know some data is available or something like that
+通知对方我不知道一些数据 是否可用或类似的东西，
+
+it depends on the what the execute is doing so during career execution
+这取决于执行正在做什么，因此在职业执行期间，
+
+parallel query processes will set each other's latch if
+并行查询进程将设置彼此的锁存器，如果
+
+they need to wake each other up at various points where they synchronize
+它们需要在同步的各个点上互相唤醒，
+
+but the whole oh sorry I didn't hear you said I didn't
+但整个哦抱歉我没有 听到你说我
+
+hear properly okay so um uh there are a few examples around there are a few
+没听清楚，好吧，嗯，有一些例子，有一些
+
+places where interrupts are held um to do with committing for example this is
+地方会发生中断，嗯，与提交有关，例如，这是
+
+some places where you don't want to error out we can't we can't
+一些你不想出错的地方，我们可以 我们不能，
+
+um yeah this this um well there's some critical sections
+嗯，是的，这个，嗯，有一些关键部分
+
+and there's some um sections where we hold for other
+，还有一些我们出于其他原因而保留的部分，
+
+reasons yeah
+是的，
+
+okay so yeah that's a good question like I understand if it does session part but
+所以是的，这是一个很好的问题，就像我理解它是否确实是会话部分，但
+
+the rule of thumb or yeah it's different
+经验法则还是是的这是不同的，
+
+yeah well the worst example I know of where
+是的，我所知道的最糟糕的例子是，
+
+where I was talking about how I think we need to try and come up with something
+我在哪里谈论我认为我们需要尝试提出
+
+more fine-grained is there are places where we hold
+更细粒度的东西，那就是在某些地方我们保留
+
+interrupts just to just to make sure that some cleanup action completes which
+中断只是为了确保一些清理操作 完成，
+
+isn't great in the in the in the light of recent developments with these
+鉴于这些
+
+barriers and things yeah all right
+障碍和事情的最新发展，这并不是很好，是的，好吧，
+
+anyone go any other questions
+任何人都可以提出任何其他问题，好吧，
+
+all right well thanks very much thank you
+非常感谢，非常感谢
